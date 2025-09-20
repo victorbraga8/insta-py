@@ -1,0 +1,16 @@
+# Ignorar pastas específicas
+OLD/
+sessions/
+utils/__pycache__/
+venv/
+
+# Ignorar arquivos sensíveis
+.env
+
+# Ignorar arquivos temporários do sistema e do editor
+*.pyc
+*.pyo
+*.log
+*.swp
+.DS_Store
+.vscode/
