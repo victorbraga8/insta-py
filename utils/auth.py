@@ -75,13 +75,32 @@ def _type_human(driver, el, text):
     time.sleep(POST_TYPE_PAUSE / 1000.0)
 
 
-def load_cookies(driver, cookie_path: Path):
+def _read_cookie_file(cookie_path: Path):
     if not cookie_path.exists():
-        return
+        return []
     try:
-        data = json.loads(cookie_path.read_text(encoding="utf-8"))
-        driver.get(HOME_URL)
-        for c in data:
+        return json.loads(cookie_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_cookies(driver, cookie_path: Path):
+    try:
+        data = driver.get_cookies()
+        cookie_path.parent.mkdir(parents=True, exist_ok=True)
+        cookie_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def ensure_login(
+    driver, username: str, password: str, profile_dir: str, timeout: int = 60
+) -> bool:
+    cookies_file = Path(profile_dir) / "cookies.json"
+    cookies = _read_cookie_file(cookies_file)
+    driver.get(HOME_URL)
+    if cookies:
+        for c in cookies:
             ck = {
                 k: v
                 for k, v in c.items()
@@ -101,25 +120,7 @@ def load_cookies(driver, cookie_path: Path):
                 driver.add_cookie(ck)
             except Exception:
                 continue
-    except Exception:
-        pass
-
-
-def save_cookies(driver, cookie_path: Path):
-    try:
-        data = driver.get_cookies()
-        cookie_path.parent.mkdir(parents=True, exist_ok=True)
-        cookie_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def ensure_login(
-    driver, username: str, password: str, profile_dir: str, timeout: int = 60
-) -> bool:
-    cookies_file = Path(profile_dir) / "cookies.json"
-    load_cookies(driver, cookies_file)
-    driver.get(HOME_URL)
+        driver.get(HOME_URL)
     _dismiss(driver)
     if _already_logged(driver):
         save_cookies(driver, cookies_file)
@@ -127,83 +128,70 @@ def ensure_login(
 
     driver.get(LOGIN_URL)
     WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.TAGNAME if False else By.TAG_NAME, "body"))
+        EC.presence_of_element_located((By.TAG_NAME, "body"))
     )
     _dismiss(driver)
-    if _already_logged(driver):
-        save_cookies(driver, cookies_file)
-        return True
 
-    for _ in range(2):
-        _dismiss(driver)
-        if _already_logged(driver):
-            save_cookies(driver, cookies_file)
-            return True
+    locs_user = [
+        (By.CSS_SELECTOR, "input[name='username']"),
+        (By.XPATH, "//input[@name='username']"),
+        (
+            By.XPATH,
+            "//input[@aria-label='Telefone, nome de usuário ou email' or @aria-label='Phone number, username, or email']",
+        ),
+    ]
+    locs_pass = [
+        (By.CSS_SELECTOR, "input[name='password']"),
+        (By.XPATH, "//input[@name='password']"),
+        (By.XPATH, "//input[@aria-label='Senha' or @aria-label='Password']"),
+    ]
 
-        locs_user = [
-            (By.CSS_SELECTOR, "input[name='username']"),
-            (By.XPATH, "//input[@name='username']"),
-            (
-                By.XPATH,
-                "//input[@aria-label='Telefone, nome de usuário ou email' or @aria-label='Phone number, username, or email']",
-            ),
-        ]
-        locs_pass = [
-            (By.CSS_SELECTOR, "input[name='password']"),
-            (By.XPATH, "//input[@name='password']"),
-            (By.XPATH, "//input[@aria-label='Senha' or @aria-label='Password']"),
-        ]
-
-        user_el = None
-        pass_el = None
-        for by, sel in locs_user:
-            try:
-                user_el = WebDriverWait(driver, 8).until(
-                    EC.presence_of_element_located((by, sel))
-                )
-                break
-            except Exception:
-                pass
-        for by, sel in locs_pass:
-            try:
-                pass_el = WebDriverWait(driver, 8).until(
-                    EC.presence_of_element_located((by, sel))
-                )
-                break
-            except Exception:
-                pass
-
-        if not user_el or not pass_el:
-            continue
-
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", user_el)
-        _type_human(driver, user_el, username)
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", pass_el)
-        _type_human(driver, pass_el, password)
-
+    user_el = None
+    pass_el = None
+    for by, sel in locs_user:
         try:
-            btn = WebDriverWait(driver, 6).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+            user_el = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((by, sel))
             )
-            _click(driver, btn)
+            break
         except Exception:
-            driver.execute_script(
-                "document.querySelector(\"button[type='submit']\")?.click();"
-            )
-
+            pass
+    for by, sel in locs_pass:
         try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located(
-                    (
-                        By.XPATH,
-                        "//nav//a[contains(@href,'/explore/')] | //a[contains(@href,'/accounts/edit')]",
-                    )
-                )
+            pass_el = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((by, sel))
             )
-            _dismiss(driver)
-            save_cookies(driver, cookies_file)
-            return True
-        except TimeoutException:
+            break
+        except Exception:
             pass
 
-    return False
+    if not user_el or not pass_el:
+        return False
+
+    _type_human(driver, user_el, username)
+    _type_human(driver, pass_el, password)
+
+    try:
+        btn = WebDriverWait(driver, 6).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']"))
+        )
+        _click(driver, btn)
+    except Exception:
+        driver.execute_script(
+            "document.querySelector(\"button[type='submit']\")?.click();"
+        )
+
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//nav//a[contains(@href,'/explore/')] | //a[contains(@href,'/accounts/edit')]",
+                )
+            )
+        )
+        _dismiss(driver)
+        save_cookies(driver, cookies_file)
+        return True
+    except TimeoutException:
+        return False

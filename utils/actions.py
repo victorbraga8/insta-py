@@ -1,6 +1,6 @@
-import os, time, json, random
+import os, time, random
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
@@ -16,27 +16,25 @@ NAV_MAX = int(os.getenv("NAVIGATE_MAX_MS", "1500"))
 ACT_MIN = int(os.getenv("ACTION_AFTER_MIN_MS", "800"))
 ACT_MAX = int(os.getenv("ACTION_AFTER_MAX_MS", "1600"))
 
-
-def mark_comment_used(recent_path: str, text: str, recent_limit: int):
-    rp = Path(recent_path)
-    lines = []
-    if rp.exists():
-        lines = [
-            ln.strip()
-            for ln in rp.read_text(encoding="utf-8").splitlines()
-            if ln.strip()
-        ]
-    lines.append(text)
-    lines = lines[-recent_limit:]
-    rp.parent.mkdir(parents=True, exist_ok=True)
-    rp.write_text("\n".join(lines), encoding="utf-8")
+TYPE_MIN = int(os.getenv("TYPE_MIN_MS", "45"))
+TYPE_MAX = int(os.getenv("TYPE_MAX_MS", "120"))
+TYPE_ERR = float(os.getenv("TYPE_MISTAKE_PROB", "0.02"))
+POST_TYPE_PAUSE = int(os.getenv("POST_TYPE_PAUSE_MS", "350"))
 
 
-def _hover_el(driver, el, lo=120, hi=320):
+def _hover(driver, el, lo=120, hi=320):
     try:
         ActionChains(driver).move_to_element(el).pause(
             random.uniform(lo / 1000, hi / 1000)
         ).perform()
+    except Exception:
+        pass
+
+
+def _center(driver, el):
+    try:
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+        _ms(random.randint(180, 360))
     except Exception:
         pass
 
@@ -57,31 +55,18 @@ def _type_human(driver, el, text: str, lo: int, hi: int, err: float, post_pause:
     _ms(post_pause)
 
 
-def _find_like_button(driver):
-    try:
-        svg = WebDriverWait(driver, 6).until(
-            EC.presence_of_element_located(
-                (By.XPATH, "//svg[@aria-label='Curtir' or @aria-label='Like']")
-            )
-        )
-        try:
-            btn = svg.find_element(By.XPATH, "./ancestor::button[1]")
-            return btn
-        except Exception:
-            pass
-        try:
-            rolebtn = svg.find_element(By.XPATH, "./ancestor::*[@role='button'][1]")
-            return rolebtn
-        except Exception:
-            return None
-    except Exception:
-        return None
+def _visible_click(driver, by, sel, t=8):
+    el = WebDriverWait(driver, t).until(EC.element_to_be_clickable((by, sel)))
+    _center(driver, el)
+    _hover(driver, el)
+    el.click()
+    return el
 
 
-def _is_liked(driver):
+def _is_liked(driver) -> bool:
     try:
         liked = driver.find_elements(
-            By.XPATH, "//svg[@aria-label='Descurtir' or @aria-label='Unlike']"
+            By.CSS_SELECTOR, "svg[aria-label='Descurtir'], svg[aria-label='Unlike']"
         )
         return len(liked) > 0
     except Exception:
@@ -92,33 +77,73 @@ def like_post(driver) -> bool:
     try:
         if _is_liked(driver):
             return True
-        btn = _find_like_button(driver)
-        if not btn:
-            return False
-        _hover_el(driver, btn)
-        btn.click()
-        _ms(random.randint(240, 680))
-        return True
+        liked_locators = [
+            (By.CSS_SELECTOR, "svg[aria-label='Descurtir']"),
+            (By.CSS_SELECTOR, "svg[aria-label='Unlike']"),
+            (
+                By.XPATH,
+                "//button//*[name()='svg' and (@aria-label='Descurtir' or @aria-label='Unlike')]",
+            ),
+        ]
+        for by, sel in liked_locators:
+            if driver.find_elements(by, sel):
+                return True
+
+        click_locators = [
+            (By.CSS_SELECTOR, "span > button[aria-label*='Curtir']"),
+            (By.CSS_SELECTOR, "span > button[aria-label*='Like']"),
+            (
+                By.XPATH,
+                "//section//button//*[name()='svg' and (@aria-label='Curtir' or @aria-label='Like')]/..",
+            ),
+            (
+                By.XPATH,
+                "//div[@role='dialog']//button//*[name()='svg' and (@aria-label='Curtir' or @aria-label='Like')]/..",
+            ),
+            (
+                By.XPATH,
+                "(//*[name()='svg' and (@aria-label='Curtir' or @aria-label='Like')]/ancestor::button)[1]",
+            ),
+            (
+                By.XPATH,
+                "(//*[name()='svg' and (@aria-label='Curtir' or @aria-label='Like')]/ancestor::*[@role='button'])[1]",
+            ),
+        ]
+        for by, sel in click_locators:
+            try:
+                _visible_click(driver, by, sel, 6)
+                _ms(random.randint(240, 680))
+                if _is_liked(driver):
+                    return True
+            except Exception:
+                continue
+        return False
     except Exception:
         return False
 
 
 def open_comment_box(driver):
     try:
-        cbtns = driver.find_elements(
-            By.XPATH,
-            "//svg[@aria-label='Comentar' or @aria-label='Comment']/ancestor::button[1]",
-        )
-        if cbtns:
-            _hover_el(driver, cbtns[0])
-            cbtns[0].click()
-            _ms(random.randint(200, 500))
+        locs = [
+            (
+                By.XPATH,
+                "(//svg[@aria-label='Comentar' or @aria-label='Comment']/ancestor::button)[1]",
+            ),
+            (By.XPATH, "//button[@aria-label='Comentar' or @aria-label='Comment']"),
+        ]
+        for by, sel in locs:
+            try:
+                _visible_click(driver, by, sel, 6)
+                _ms(random.randint(200, 500))
+                return
+            except Exception:
+                continue
     except Exception:
         pass
 
 
 def _find_textarea(driver):
-    sels = [
+    locs = [
         (
             By.XPATH,
             "//textarea[@aria-label='Adicione um comentário...' or contains(@aria-label,'coment') or contains(@aria-label,'comment')]",
@@ -128,8 +153,9 @@ def _find_textarea(driver):
             "//textarea[@placeholder='Adicione um comentário...' or contains(@placeholder,'coment') or contains(@placeholder,'comment')]",
         ),
         (By.CSS_SELECTOR, "form textarea"),
+        (By.XPATH, "//div[@role='dialog']//form//textarea"),
     ]
-    for by, sel in sels:
+    for by, sel in locs:
         els = driver.find_elements(by, sel)
         if els:
             return els[0]
@@ -144,17 +170,29 @@ def comment_post(
         box = _find_textarea(driver)
         if not box:
             return False
-        _hover_el(driver, box)
+        _center(driver, box)
+        _hover(driver, box)
         _type_human(driver, box, text, lo, hi, err, post_pause)
-        submit = driver.find_elements(
-            By.XPATH, "//form//button[@type='submit' or .='Post' or .='Publicar']"
-        )
-        if submit:
-            _hover_el(driver, submit[0])
-            submit[0].click()
-        else:
-            ActionChains(driver).key_down("\n").key_up("\n").perform()
-        _ms(random.randint(650, 1200))
+        send_locs = [
+            (By.XPATH, "//form//button[@type='submit' or .='Post' or .='Publicar']"),
+            (
+                By.XPATH,
+                "//div[@role='dialog']//form//button[@type='submit' or .='Post' or .='Publicar']",
+            ),
+        ]
+        for by, sel in send_locs:
+            try:
+                btns = driver.find_elements(by, sel)
+                if btns:
+                    _center(driver, btns[0])
+                    _hover(driver, btns[0])
+                    btns[0].click()
+                    _ms(random.randint(650, 1200))
+                    return True
+            except Exception:
+                continue
+        ActionChains(driver).key_down("\n").key_up("\n").perform()
+        _ms(random.randint(700, 1300))
         return True
     except Exception:
         return False
@@ -189,3 +227,18 @@ def load_comments_pool(path: str, recent_path: str, recent_limit: int) -> List[s
         cand = pool[:]
     random.shuffle(cand)
     return cand
+
+
+def mark_comment_used(recent_path: str, text: str, recent_limit: int):
+    rp = Path(recent_path)
+    lines = []
+    if rp.exists():
+        lines = [
+            ln.strip()
+            for ln in rp.read_text(encoding="utf-8").splitlines()
+            if ln.strip()
+        ]
+    lines.append(text)
+    lines = lines[-recent_limit:]
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_text("\n".join(lines), encoding="utf-8")
