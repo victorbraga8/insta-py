@@ -11,9 +11,19 @@ from utils.actions import (
     comment_post,
     view_reel,
 )
+
 from utils.registry import load_used, mark_used
 from utils.strategy import StrategyPlan
 from utils.logger import Logger
+
+NAV_MIN = int(os.getenv("NAVIGATE_MIN_MS", "700"))
+NAV_MAX = int(os.getenv("NAVIGATE_MAX_MS", "1500"))
+ACT_MIN = int(os.getenv("ACTION_AFTER_MIN_MS", "800"))
+ACT_MAX = int(os.getenv("ACTION_AFTER_MAX_MS", "1600"))
+
+
+def _ms(n):
+    time.sleep(n / 1000.0)
 
 
 def _read_links(out_dir: str, tags: List[str]) -> List[str]:
@@ -53,31 +63,36 @@ def _perform(
     view_max_ms: int,
 ) -> str:
     driver.get(url)
+    _ms(random.randint(NAV_MIN, NAV_MAX))
     WebDriverWait(driver, 15).until(
         EC.presence_of_element_located((By.TAG_NAME, "body"))
     )
-    time.sleep(random.uniform(0.25, 0.8))
+    _ms(random.randint(260, 620))
     if action == "like":
         ok = like_post(driver)
+        _ms(random.randint(ACT_MIN, ACT_MAX))
         return "ok" if ok else "fail"
     if action == "comment":
         if not comments_pool:
             return "no-comment"
         text = comments_pool.pop()
         ok = comment_post(driver, text, type_lo, type_hi, type_err, post_pause)
+        _ms(random.randint(ACT_MIN, ACT_MAX))
         return f"ok:{text}" if ok else "fail"
     if action == "reels":
         if not _is_reel_url(url):
             return "skip"
         ok = view_reel(driver, view_min_ms, view_max_ms)
+        _ms(random.randint(ACT_MIN, ACT_MAX))
         return "ok" if ok else "fail"
     if action == "combo":
         if not comments_pool:
             return "no-comment"
         text = comments_pool.pop()
         ok_like = like_post(driver)
-        time.sleep(random.uniform(0.4, 1.1))
+        _ms(random.randint(300, 700))
         ok_c = comment_post(driver, text, type_lo, type_hi, type_err, post_pause)
+        _ms(random.randint(ACT_MIN, ACT_MAX))
         return f"ok:{text}" if (ok_like and ok_c) else "fail"
     return "skip"
 
@@ -144,35 +159,48 @@ def run_actions(driver, profile_id: str):
                 if ":" in res:
                     text = res.split(":", 1)[1]
                     record["comment"] = text
-                    mark_comment_used(
-                        f"{reg_dir}/recent_comments.txt",
-                        text,
-                        int(os.getenv("COMMENTS_RECENT", "60")),
-                    )
+
+                mark_comment_used(
+                    f"{reg_dir}/recent_comments.txt",
+                    text,
+                    int(os.getenv("COMMENTS_RECENT", "60")),
+                )
+
                 mark_used(reg_dir, url, record)
                 processed += 1
                 left = plan.remaining()
                 done = plan.done
-                log.progress(done, left, _recompute_totals(total))
+                log.progress(
+                    done,
+                    left,
+                    {
+                        "like": total.get("like", 0),
+                        "comment": total.get("comment", 0),
+                        "combo": total.get("combo", 0),
+                        "reels": total.get("reels", 0),
+                    },
+                )
             elif res == "no-comment":
                 log.error(f"sem comentário disponível | ação {action} | url {url}")
             elif res in ("fail", "skip"):
                 log.error(f"falha em {action} | url {url}")
-            time.sleep(random.uniform(1.0, 2.2))
+            _ms(random.randint(900, 1800))
         except Exception as e:
+            import traceback
+
             tb = "".join(traceback.format_exc().splitlines()[-2:])
             log.error(f"exceção em {action} | url {url} | {e} | {tb}")
-            time.sleep(1.2)
+            _ms(1200)
     left = plan.remaining()
     done = plan.done
     log.info(f"final execução | feitos {processed}/{target_total}")
-    log.progress(done, left, _recompute_totals(total))
-
-
-def _recompute_totals(total):
-    return {
-        "like": total.get("like", 0),
-        "comment": total.get("comment", 0),
-        "combo": total.get("combo", 0),
-        "reels": total.get("reels", 0),
-    }
+    log.progress(
+        done,
+        left,
+        {
+            "like": total.get("like", 0),
+            "comment": total.get("comment", 0),
+            "combo": total.get("combo", 0),
+            "reels": total.get("reels", 0),
+        },
+    )

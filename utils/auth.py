@@ -63,7 +63,6 @@ def _type_human(driver, el, text):
         "arguments[0].value=''; arguments[0].dispatchEvent(new Event('input',{bubbles:true}));",
         el,
     )
-    typed = []
     for ch in text:
         if random.random() < TYPE_ERR:
             wrong = chr(random.randint(97, 122))
@@ -72,7 +71,6 @@ def _type_human(driver, el, text):
             ActionChains(driver).send_keys("\b").perform()
             time.sleep(random.uniform(TYPE_MIN, TYPE_MAX) / 1000.0)
         ActionChains(driver).send_keys(ch).perform()
-        typed.append(ch)
         time.sleep(random.uniform(TYPE_MIN, TYPE_MAX) / 1000.0)
     time.sleep(POST_TYPE_PAUSE / 1000.0)
 
@@ -103,7 +101,6 @@ def load_cookies(driver, cookie_path: Path):
                 driver.add_cookie(ck)
             except Exception:
                 continue
-        driver.get(HOME_URL)
     except Exception:
         pass
 
@@ -122,20 +119,22 @@ def ensure_login(
 ) -> bool:
     cookies_file = Path(profile_dir) / "cookies.json"
     load_cookies(driver, cookies_file)
+    driver.get(HOME_URL)
+    _dismiss(driver)
     if _already_logged(driver):
         save_cookies(driver, cookies_file)
         return True
 
     driver.get(LOGIN_URL)
     WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.TAG_NAME, "body"))
+        EC.presence_of_element_located((By.TAGNAME if False else By.TAG_NAME, "body"))
     )
     _dismiss(driver)
     if _already_logged(driver):
         save_cookies(driver, cookies_file)
         return True
 
-    for _ in range(3):
+    for _ in range(2):
         _dismiss(driver)
         if _already_logged(driver):
             save_cookies(driver, cookies_file)
@@ -175,12 +174,10 @@ def ensure_login(
                 pass
 
         if not user_el or not pass_el:
-            driver.get(LOGIN_URL)
             continue
 
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", user_el)
         _type_human(driver, user_el, username)
-
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", pass_el)
         _type_human(driver, pass_el, password)
 
@@ -207,6 +204,6 @@ def ensure_login(
             save_cookies(driver, cookies_file)
             return True
         except TimeoutException:
-            driver.get(LOGIN_URL)
+            pass
 
     return False
