@@ -3,6 +3,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from utils.driver import criar_driver
 from utils.auth import ensure_login
+from utils.collector import collect_for_tags
+from utils.runner import run_actions
 
 
 def run_profile(profile_id: str):
@@ -33,6 +35,12 @@ def run_profile(profile_id: str):
             pass
         return
     try:
+        tags = [t.strip() for t in os.getenv("TAGS", "").split(",") if t.strip()]
+        per_tag = int(os.getenv("PER_TAG", "30"))
+        out_dir = os.getenv("OUT_DIR", "data/links")
+        if tags:
+            collect_for_tags(driver, tags, per_tag, out_dir)
+        run_actions(driver, profile_id)
         while True:
             driver.execute_script("return 1")
             time.sleep(5)
