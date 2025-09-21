@@ -42,7 +42,7 @@ class Config:
 
     # -------- Conteúdo-alvo --------
     # Hashtags base — ajuste à sua estratégia; a coleta usa /explore/tags/<tag>
-    tags: List[str] = field(default_factory=lambda: ["paraguai", "uruguai", "brazil"])
+    tags: List[str] = field(default_factory=lambda: ["colombia", "peru", "venezuela"])
     # Mantido para possível expansão futura (não usado no fluxo atual)
     locations: List[str] = field(default_factory=list)
 
