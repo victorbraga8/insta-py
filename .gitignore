@@ -3,7 +3,9 @@ OLD/
 sessions/
 utils/__pycache__/
 venv/
-
+DEPRECATED/
+DEPRECATED
+/DEPRECATED
 # Ignorar arquivos sensíveis
 .env
 
