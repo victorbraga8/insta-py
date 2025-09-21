@@ -1,6 +1,6 @@
 # 🤖 InstaPY Automator
 
-Bot automatizador para Instagram desenvolvido em **Python + Selenium**, com foco em curtidas (**like**) e comentários (**comment**) de maneira segura e configurável.
+Automatizador para Instagram desenvolvido em **Python + Selenium**, com foco em curtidas (**like**) e comentários (**comment**) de maneira segura e configurável.
 
 ---
 
