@@ -51,6 +51,7 @@ def _build_chrome_options(
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--disable-gpu")
 
+    # reduzir sinais de automação
     opts.add_experimental_option(
         "excludeSwitches", ["enable-automation", "enable-logging"]
     )
@@ -64,7 +65,9 @@ def _build_chrome_options(
             opts.add_argument(a)
 
     merged_prefs = {
+        # geolocalização: permitir (1) para o override funcionar sem prompt
         "profile.default_content_setting_values.geolocation": 1,
+        # notificações: bloqueadas (2) para não atrapalhar fluxo
         "profile.default_content_setting_values.notifications": 2,
     }
     if prefs:
@@ -79,6 +82,7 @@ def _build_chrome_options(
 
 
 def _apply_stealth_cdp(driver: webdriver.Chrome) -> None:
+    """Atenua sinais básicos de automação sem alterar APIs públicas."""
     try:
         driver.execute_cdp_cmd(
             "Page.addScriptToEvaluateOnNewDocument",
@@ -92,6 +96,24 @@ def _apply_stealth_cdp(driver: webdriver.Chrome) -> None:
             },
         )
     except Exception:
+        pass
+
+
+def _grant_geolocation_for_instagram(driver: webdriver.Chrome) -> None:
+    """
+    Concede permissão de geolocalização para o origin do Instagram via CDP.
+    Não quebra nada se falhar; apenas melhora a taxa de sucesso do override.
+    """
+    try:
+        driver.execute_cdp_cmd(
+            "Browser.grantPermissions",
+            {
+                "origin": "https://www.instagram.com",
+                "permissions": ["geolocation"],
+            },
+        )
+    except Exception:
+        # Em algumas versões/headless esta chamada pode não existir; é seguro ignorar.
         pass
 
 
@@ -126,6 +148,7 @@ def init_driver(
 
     driver = webdriver.Chrome(service=service, options=options)
 
+    # timeouts “defensivos”
     try:
         driver.set_page_load_timeout(page_load_timeout)
     except Exception:
@@ -139,7 +162,10 @@ def init_driver(
     except Exception:
         pass
 
+    # stealth básico + permissão de geolocalização para IG
     _apply_stealth_cdp(driver)
+    _grant_geolocation_for_instagram(driver)
+
     return driver
 
 

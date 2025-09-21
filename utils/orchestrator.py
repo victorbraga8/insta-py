@@ -3,6 +3,8 @@ import os
 import signal
 import random
 import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Dict, Iterator, Optional
 
@@ -48,6 +50,13 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)).strip())
+    except Exception:
+        return default
+
+
 def _weighted_choice(d: Dict[str, float]) -> str:
     keys = list(d.keys())
     weights = list(d.values())
@@ -89,6 +98,14 @@ def _profile_worker():
 
     session_dir = SESSIONS_DIR / "default"
     session_dir.mkdir(parents=True, exist_ok=True)
+
+    # ----- Novos controles: timebox e soft-cap por hora -----
+    timebox_hours = _env_float("ORCH_TIMEBOX_HOURS", 6.0)  # padrão 6h
+    hourly_soft_cap = _env_int("ORCH_HOURLY_SOFT_CAP", 20)  # padrão 20 ações/h
+    hourly_window_secs = 3600
+    hourly_actions = deque()  # timestamps (time.time()) das últimas ações concluídas
+    start_ts = time.time()
+    deadline_ts = start_ts + (timebox_hours * 3600.0)
 
     try:
         driver = init_driver(
@@ -139,6 +156,13 @@ def _profile_worker():
         # Aplicar geolocalização do config se habilitado (não conflita com auth)
         _set_geolocation(driver)
 
+        # Atraso humano inicial por perfil (evita partida sincronizada)
+        human_sleep(
+            cfg.profile_start_stagger_range_seconds,
+            reason="profile start stagger",
+            logger=logger,
+        )
+
         # Coleta inicial (tags/locations)
         try:
             with timeit(logger, "default coleta_inicial"):
@@ -165,6 +189,35 @@ def _profile_worker():
         collected_iter: Iterator[dict] = iter(collected)
 
         while not STOP_EVENT.is_set() and actions_done < cfg.max_actions_per_profile:
+            # ----- Checagem de timebox (6h por padrão) -----
+            now = time.time()
+            if now >= deadline_ts:
+                elapsed = now - start_ts
+                logger.info(
+                    f"[default] Timebox atingido ({elapsed/3600:.2f}h). Encerrando worker."
+                )
+                break
+
+            # ----- Soft-cap por hora (janela deslizante de 60min) -----
+            # Remove timestamps fora da janela de 1h
+            while hourly_actions and (now - hourly_actions[0] > hourly_window_secs):
+                hourly_actions.popleft()
+
+            if len(hourly_actions) >= hourly_soft_cap:
+                # Cooldown humano para aliviar a taxa
+                cooldown_range = (300.0, 600.0)  # 5 a 10 minutos
+                logger.info(
+                    f"[default] Soft-cap horário atingido "
+                    f"({len(hourly_actions)}/{hourly_soft_cap}). "
+                    f"Cooldown por {int(cooldown_range[0])}-{int(cooldown_range[1])}s."
+                )
+                human_sleep(
+                    cooldown_range, reason="hourly soft-cap cooldown", logger=logger
+                )
+                # Após cooldown, revalida timebox e continua o loop
+                continue
+
+            # ----- Selecionar próximo alvo -----
             target: Optional[dict] = None
             try:
                 # Próximo target não utilizado
@@ -196,6 +249,7 @@ def _profile_worker():
                                 len(more),
                                 phase="incremental",
                             )
+                            # volta ao topo do while para pegar o novo target
                             continue
                         else:
                             logger.info(
@@ -256,10 +310,16 @@ def _profile_worker():
                 log_action_result(logger, "default", action, ok)
                 if ok:
                     actions_done += 1
+                    # registra timestamp desta ação concluída para a janela horária
+                    hourly_actions.append(time.time())
+
             except Exception as e:
                 logger.exception(f"[default] Erro executando '{action}': {e}")
 
-        logger.info(f"[default] Finalizado. Ações realizadas: {actions_done}")
+        logger.info(
+            f"[default] Finalizado. Ações realizadas: {actions_done} "
+            f"(janela real: {(time.time()-start_ts)/3600:.2f}h)."
+        )
 
     finally:
         with DRIVERS_LOCK:

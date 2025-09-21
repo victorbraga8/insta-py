@@ -1,6 +1,7 @@
 # utils/action.py
 from __future__ import annotations
 
+import os
 import time
 import random
 from typing import Optional, Dict, List, Tuple
@@ -32,6 +33,20 @@ def _human_type(
     for ch in text:
         el.send_keys(ch)
         time.sleep(random.uniform(min_delay, max_delay))
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)).strip())
+    except Exception:
+        return default
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)).strip())
+    except Exception:
+        return default
 
 
 def _js_query(driver: WebDriver, css: str):
@@ -220,18 +235,23 @@ def _gather_like_candidates(driver: WebDriver) -> List[Tuple[str, object]]:
 
 def _click_svg_like(driver: WebDriver, el) -> bool:
     try:
+        # micro-delays humanos
+        _sleep(0.10, 0.25)
         _highlight(driver, el, "red")
         logger.info(f"🖱️ click SVG alvo: {_describe_el(driver, el)}")
         driver.execute_script("arguments[0].click();", el)
+        _sleep(0.10, 0.25)
         return True
     except Exception as e:
         logger.warning(f"Falha ao clicar no SVG (direto): {e}")
     try:
         parent = driver.execute_script("return arguments[0].parentElement;", el)
         if parent:
+            _sleep(0.08, 0.18)
             _highlight(driver, parent, "red")
             logger.info(f"🖱️ fallback click PAI: {_describe_el(driver, parent)}")
             driver.execute_script("arguments[0].click();", parent)
+            _sleep(0.10, 0.25)
             return True
     except Exception as e:
         logger.warning(f"Falha ao clicar no pai: {e}")
@@ -240,13 +260,78 @@ def _click_svg_like(driver: WebDriver, el) -> bool:
             "return arguments[0].parentElement?.parentElement;", el
         )
         if grand:
+            _sleep(0.08, 0.18)
             _highlight(driver, grand, "red")
             logger.info(f"🖱️ fallback click AVÔ: {_describe_el(driver, grand)}")
             driver.execute_script("arguments[0].click();", grand)
+            _sleep(0.10, 0.25)
             return True
     except Exception as e:
         logger.warning(f"Falha ao clicar no avô: {e}")
     return False
+
+
+# =========================
+# Bloqueio / rate limit helpers
+# =========================
+_BLOCK_PATTERNS_PT = [
+    "Ação bloqueada",
+    "Limitamos com que frequência",
+    "Tente novamente mais tarde",
+    "Não foi possível concluir",
+    "Limite de tentativas",
+]
+_BLOCK_PATTERNS_EN = [
+    "Action blocked",
+    "We limit how often",
+    "Try again later",
+    "Couldn't complete your request",
+    "We restrict certain activity",
+]
+
+
+def _detect_action_blocked(driver: WebDriver) -> bool:
+    """Detecta sinais de bloqueio/limite na UI (PT/EN)."""
+    try:
+        # Áreas comuns de banners/alerts/dialogs
+        nodes = []
+        nodes += _xpath_all(driver, "//*[@role='alert' or @role='status']")
+        nodes += _xpath_all(
+            driver, "//*[@aria-live='polite' or @aria-live='assertive']"
+        )
+        nodes += _xpath_all(driver, "//*[@role='dialog']//*[not(self::script)]")
+        # Varredura leve por fragments (limita a 200 nós para não custar caro)
+        scans = nodes[:200]
+        for n in scans:
+            try:
+                txt = (n.text or "").strip()
+                if not txt:
+                    continue
+                for frag in _BLOCK_PATTERNS_PT:
+                    if frag.lower() in txt.lower():
+                        logger.info(f"🚫 bloqueio detectado (PT): {txt!r}")
+                        return True
+                for frag in _BLOCK_PATTERNS_EN:
+                    if frag.lower() in txt.lower():
+                        logger.info(f"🚫 bloqueio detectado (EN): {txt!r}")
+                        return True
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return False
+
+
+def _cooldown_on_block() -> None:
+    # Padrão conservador: 10 a 30 minutos
+    cmin = _env_int("ACTION_BLOCK_COOLDOWN_MIN", 600)
+    cmax = _env_int("ACTION_BLOCK_COOLDOWN_MAX", 1800)
+    if cmax < cmin:
+        cmax = cmin
+    logger.info(
+        f"🧊 cooldown por bloqueio acionado: aguardando {cmin}-{cmax}s antes de retomar."
+    )
+    _sleep(cmin, cmax)
 
 
 # =========================
@@ -303,6 +388,11 @@ def do_like(
     if not _navigate_to_target(driver, target):
         return False
 
+    # checa bloqueio antes de tentar
+    if _detect_action_blocked(driver):
+        _cooldown_on_block()
+        return False
+
     if _already_liked(driver):
         logger.info("Post já curtido — marcando como consumido e pulando.")
         mark_target_consumed(profile_dir, target.get("id", target.get("url", "")))
@@ -313,13 +403,22 @@ def do_like(
         logger.info("❌ nenhum candidato de like encontrado (SVG 24x24).")
         return False
 
+    # tenta até 2 candidatos diferentes antes de desistir (evita spam de cliques)
+    attempts = 0
     for sel, el in candidates:
+        attempts += 1
         logger.info(f"tentando clicar candidato '{sel}' -> {_describe_el(driver, el)}")
         ok = _click_svg_like(driver, el)
         logger.info(f"resultado do clique: {'SUCESSO' if ok else 'FALHA'}")
         if not ok:
+            if _detect_action_blocked(driver):
+                _cooldown_on_block()
+                return False
+            if attempts >= 2:
+                break
             continue
 
+        # confirmação de estado
         end = time.time() + 3.5
         while time.time() < end:
             if _already_liked(driver):
@@ -329,9 +428,16 @@ def do_like(
                 )
                 return True
             time.sleep(0.15)
+
         logger.info(
-            "⚠️ clique executado, mas não confirmou 'Descurtir' — tentando próximo candidato…"
+            "⚠️ clique executado, mas não confirmou 'Descurtir' — verificando bloqueio e/ou tentando próximo…"
         )
+        if _detect_action_blocked(driver):
+            _cooldown_on_block()
+            return False
+
+        if attempts >= 2:
+            break
 
     logger.info("❌ esgotou candidatos de like sem confirmação.")
     return False
@@ -341,7 +447,7 @@ def do_comment(
     driver: WebDriver, target: Dict, text: str, *, profile_dir: Optional[str] = None
 ) -> bool:
     """
-    Comentário usando a mesma lógica de digitação “humana” do login:
+    Comentário usando a mesma lógica de digitação “humana”:
     - encontra exatamente o textarea correto (PT/EN, … e ...)
     - clica para focar, garante foco e digita com _human_type
     - tenta clicar no botão 'Post/Publicar' (UI nova). Se não achar, ENTER.
@@ -352,6 +458,11 @@ def do_comment(
         return False
 
     if not _navigate_to_target(driver, target):
+        return False
+
+    # checa bloqueio antes
+    if _detect_action_blocked(driver):
+        _cooldown_on_block()
         return False
 
     textarea = _find_comment_textarea_simple(driver)
@@ -418,6 +529,11 @@ def do_comment(
             logger.warning(f"Falha ao enviar ENTER: {e}")
 
     _sleep(0.7, 1.2)
+
+    # Checa bloqueio pós-envio
+    if _detect_action_blocked(driver):
+        _cooldown_on_block()
+        return False
 
     # Confirmação
     try:
