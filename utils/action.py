@@ -3,23 +3,31 @@ from __future__ import annotations
 
 import time
 import random
-from typing import Optional, Dict, Iterable
+from typing import Optional, Dict, Iterable, List, Tuple
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import WebDriverException, TimeoutException
 
-from utils.logger import get_logger, human_sleep, timeit
+from utils.logger import get_logger
 from utils.driver import wait_for_page_ready
 from utils.collector import mark_target_consumed
 
 logger = get_logger("action")
 
 
-# ---------------------------
-# Helpers
-# ---------------------------
+# =========================
+# Utilitários
+# =========================
+def _sleep(a: float, b: float) -> None:
+    t = random.uniform(a, b)
+    logger.info(f"⏱️ aguardando {t:.3f}s")
+    time.sleep(t)
+
+
 def _human_type(
     el, text: str, min_delay: float = 0.03, max_delay: float = 0.12
 ) -> None:
@@ -28,30 +36,72 @@ def _human_type(
         time.sleep(random.uniform(min_delay, max_delay))
 
 
-def _find_visible(driver: WebDriver, by, selector, timeout: float = 3.0):
-    end = time.time() + timeout
-    while time.time() < end:
-        try:
-            el = driver.find_element(by, selector)
-            if el and el.is_displayed():
-                return el
-        except Exception:
-            pass
-        time.sleep(0.15)
-    return None
-
-
-def _find_all(driver: WebDriver, by, selector) -> Iterable:
+def _js_query(driver: WebDriver, css: str):
     try:
-        return driver.find_elements(by, selector)
+        return driver.execute_script(
+            "return document.querySelector(arguments[0]);", css
+        )
+    except Exception:
+        return None
+
+
+def _js_query_all(driver: WebDriver, css: str) -> list:
+    try:
+        return (
+            driver.execute_script(
+                "return Array.from(document.querySelectorAll(arguments[0]));", css
+            )
+            or []
+        )
     except Exception:
         return []
+
+
+def _xpath_all(driver: WebDriver, xpath: str) -> list:
+    try:
+        return driver.find_elements(By.XPATH, xpath) or []
+    except Exception:
+        return []
+
+
+def _highlight(driver: WebDriver, el, color: str = "red") -> None:
+    try:
+        driver.execute_script(
+            """
+            const el = arguments[0], c = arguments[1];
+            el.scrollIntoView({block:'center', inline:'center'});
+            el.style.outline = `3px solid ${c}`;
+            el.style.outlineOffset = '2px';
+            """,
+            el,
+            color,
+        )
+    except Exception:
+        pass
+
+
+def _describe_el(driver: WebDriver, el) -> str:
+    try:
+        return driver.execute_script(
+            """
+            const el = arguments[0];
+            const r = el.getBoundingClientRect();
+            const a = el.getAttribute('aria-label');
+            const w = el.getAttribute('width');
+            const h = el.getAttribute('height');
+            return `${el.tagName.toLowerCase()} aria='${a}' w=${w||'-'} h=${h||'-'} bx=${r.left.toFixed(0)},${r.top.toFixed(0)},${r.width.toFixed(0)}x${r.height.toFixed(0)}`;
+            """,
+            el,
+        )
+    except Exception:
+        return "<element>"
 
 
 def _navigate_to_target(driver: WebDriver, target: Dict) -> bool:
     url = target.get("url")
     if not url:
         return False
+    logger.info(f"🧭 navegando para: {url}")
     try:
         driver.get(url)
     except WebDriverException:
@@ -60,311 +110,260 @@ def _navigate_to_target(driver: WebDriver, target: Dict) -> bool:
         except Exception as e:
             logger.warning(f"Falha ao navegar para {url}: {e}")
             return False
-
-    wait_for_page_ready(driver, timeout=10.0)
-    human_sleep((0.6, 1.2), reason="estabilizar DOM", logger=logger)
-
-    # banner de cookies comum
-    try:
-        btn = _find_visible(
-            driver,
-            By.XPATH,
-            "//button[contains(., 'Aceitar todos') or contains(., 'Accept all') or contains(., 'Permitir todos') or contains(., 'Allow all')]",
-            timeout=1.0,
-        )
-        if btn:
-            btn.click()
-            human_sleep((0.2, 0.4), reason="fechar banner", logger=logger)
-    except Exception:
-        pass
-
+    wait_for_page_ready(driver, timeout=12.0)
+    _sleep(0.4, 0.9)
     return True
 
 
-def _avoid_liked_by_redirect(driver: WebDriver) -> None:
+# =========================
+# Seletores
+# =========================
+LIKE_CSS_PT = 'svg[aria-label="Curtir"][width="24"][height="24"]'
+LIKE_CSS_EN = 'svg[aria-label="Like"][width="24"][height="24"]'
+UNLIKE_CSS_PT = 'svg[aria-label="Descurtir"][width="24"][height="24"]'
+UNLIKE_CSS_EN = 'svg[aria-label="Unlike"][width="24"][height="24"]'
+
+# XPath com local-name(), como no fórum — com width/height 24
+LIKE_XP_PT = (
+    "//*[local-name()='svg' and @aria-label='Curtir' and @width='24' and @height='24']"
+)
+LIKE_XP_EN = (
+    "//*[local-name()='svg' and @aria-label='Like' and @width='24' and @height='24']"
+)
+UNLIKE_XP_PT = "//*[local-name()='svg' and @aria-label='Descurtir' and @width='24' and @height='24']"
+UNLIKE_XP_EN = (
+    "//*[local-name()='svg' and @aria-label='Unlike' and @width='24' and @height='24']"
+)
+
+# Último recurso de debug: qualquer svg 24x24 (não usamos para clicar, apenas logging)
+ANY_24 = "//*[local-name()='svg' and @width='24' and @height='24']"
+
+COMMENT_TA_EXACT = 'textarea[aria-label="Adicione um comentário..."]'
+COMMENT_TA_UNICODE = (
+    'textarea[aria-label="Adicione um comentário…"]'  # reticência unicode
+)
+
+
+# =========================
+# Coleta / verificação Like
+# =========================
+def _inventory_svgs(driver: WebDriver) -> Dict[str, List]:
+    """Varre múltiplos seletores e retorna um inventário para logging e tentativa."""
+    inv: Dict[str, List] = {
+        LIKE_CSS_PT: _js_query_all(driver, LIKE_CSS_PT),
+        LIKE_CSS_EN: _js_query_all(driver, LIKE_CSS_EN),
+        LIKE_XP_PT: _xpath_all(driver, LIKE_XP_PT),
+        LIKE_XP_EN: _xpath_all(driver, LIKE_XP_EN),
+        UNLIKE_CSS_PT: _js_query_all(driver, UNLIKE_CSS_PT),
+        UNLIKE_CSS_EN: _js_query_all(driver, UNLIKE_CSS_EN),
+        UNLIKE_XP_PT: _xpath_all(driver, UNLIKE_XP_PT),
+        UNLIKE_XP_EN: _xpath_all(driver, UNLIKE_XP_EN),
+        ANY_24: _xpath_all(driver, ANY_24),  # debug view
+    }
+    # Log do inventário
+    logger.info("🔬 inventário de SVGs 24x24 relevantes:")
+    for sel, items in inv.items():
+        if sel is ANY_24:
+            logger.info(f"  {sel} => {len(items)} elementos (apenas debug)")
+        else:
+            logger.info(f"  {sel} => {len(items)} elementos")
+        # listar primeiros 5 para não poluir
+        for el in items[:5]:
+            logger.info(f"    • {_describe_el(driver, el)}")
+    return inv
+
+
+def _already_liked(driver: WebDriver) -> bool:
+    # qualquer uma das variantes de 'descurtir'
+    for sel in (UNLIKE_CSS_PT, UNLIKE_CSS_EN):
+        el = _js_query(driver, sel)
+        if el:
+            logger.info(
+                f"✅ detectado estado curtido via CSS: {_describe_el(driver, el)}"
+            )
+            return True
+    for xp in (UNLIKE_XP_PT, UNLIKE_XP_EN):
+        els = _xpath_all(driver, xp)
+        if els:
+            logger.info(
+                f"✅ detectado estado curtido via XPath: {_describe_el(driver, els[0])}"
+            )
+            return True
+    return False
+
+
+def _gather_like_candidates(driver: WebDriver) -> List[Tuple[str, object]]:
+    """Retorna lista ordenada (seletor, elemento) de candidatos a 'Curtir' (SVG 24x24)."""
+    inv = _inventory_svgs(driver)
+
+    ordered_keys = [
+        LIKE_CSS_PT,
+        LIKE_CSS_EN,
+        LIKE_XP_PT,
+        LIKE_XP_EN,
+    ]
+    seen_ids = set()
+    candidates: List[Tuple[str, object]] = []
+    for key in ordered_keys:
+        for el in inv.get(key, []):
+            # deduplicar pelo id interno do WebElement
+            try:
+                el_id = getattr(el, "id", None)
+            except Exception:
+                el_id = None
+            if el_id in seen_ids:
+                continue
+            seen_ids.add(el_id)
+            candidates.append((key, el))
+
+    logger.info(f"🎯 candidatos 'Curtir' (em ordem): {len(candidates)}")
+    for i, (sel, el) in enumerate(candidates[:6], 1):
+        logger.info(f"  [{i}] {sel} -> {_describe_el(driver, el)}")
+    return candidates
+
+
+def _click_svg_like(driver: WebDriver, el) -> bool:
+    # 1) clicar no SVG
     try:
-        if "/liked_by/" in (driver.current_url or ""):
-            logger.info("Redirecionado para '/liked_by/'. Voltando…")
-            driver.back()
-            wait_for_page_ready(driver, timeout=6.0)
-            human_sleep((0.4, 0.8), reason="retorno de liked_by", logger=logger)
-    except Exception:
-        pass
-
-
-# ---------- UI highlight ----------
-def _highlight_element(
-    driver: WebDriver,
-    el,
-    *,
-    color: str = "red",
-    duration_ms: int = 1400,
-    label: str = "",
-) -> None:
-    """
-    Desenha um retângulo de destaque (borda e glow) sobre o elemento na viewport.
-    - color: 'red' para clique / 'yellow' para skip etc.
-    - duration_ms: tempo em ms que o overlay fica visível
-    - label: texto opcional exibido acima do retângulo
-    """
-    try:
-        driver.execute_script(
-            """
-            (function(el, color, duration, label) {
-              try {
-                const rect = el.getBoundingClientRect();
-                const d = document;
-                const overlay = d.createElement('div');
-                overlay.setAttribute('data-debug-overlay', 'true');
-                overlay.style.position = 'fixed';
-                overlay.style.left = rect.left + 'px';
-                overlay.style.top = rect.top + 'px';
-                overlay.style.width = rect.width + 'px';
-                overlay.style.height = rect.height + 'px';
-                overlay.style.border = '3px solid ' + color;
-                overlay.style.borderRadius = '14px';
-                overlay.style.boxShadow = '0 0 0 4px rgba(0,0,0,0.15), 0 0 16px 4px ' + color;
-                overlay.style.pointerEvents = 'none';
-                overlay.style.zIndex = 2147483647;
-                overlay.style.transition = 'opacity 150ms ease-out';
-                overlay.style.opacity = '1';
-
-                let caption;
-                if (label && label.length) {
-                  caption = d.createElement('div');
-                  caption.textContent = label;
-                  caption.style.position = 'fixed';
-                  caption.style.left = rect.left + 'px';
-                  caption.style.top = Math.max(8, rect.top - 26) + 'px';
-                  caption.style.padding = '2px 6px';
-                  caption.style.font = '12px/16px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica, Arial';
-                  caption.style.color = '#fff';
-                  caption.style.background = color;
-                  caption.style.borderRadius = '8px';
-                  caption.style.pointerEvents = 'none';
-                  caption.style.zIndex = 2147483647;
-                  d.body.appendChild(caption);
-                }
-
-                d.body.appendChild(overlay);
-
-                // leve animação
-                overlay.animate(
-                  [{ transform: 'scale(1.02)', opacity: 0.85 }, { transform: 'scale(1)', opacity: 1 }],
-                  { duration: 200, easing: 'ease-out' }
-                );
-
-                setTimeout(() => {
-                  overlay.style.opacity = '0';
-                  if (caption) caption.style.opacity = '0';
-                  setTimeout(() => {
-                    overlay.remove();
-                    if (caption) caption.remove();
-                  }, 180);
-                }, Math.max(200, duration));
-              } catch (e) { /* noop */ }
-            })(arguments[0], arguments[1], arguments[2], arguments[3]);
-            """,
-            el,
-            color,
-            int(duration_ms),
-            label or "",
-        )
-    except Exception:
-        # se não conseguir, apenas ignore — é feature de debug
-        pass
-
-
-# Seletores EXACTOS (PT-BR) conforme solicitado:
-# - Comentário: textarea[aria-label="Adicione um comentário..."]
-# - Like já aplicado (pular): svg[aria-label="Descurtir"][width="24"][height="24"]
-# - Pode curtir:             svg[aria-label="Curtir"][width="24"][height="24"]
-
-
-def _svg_unlike(driver: WebDriver):
-    try:
-        return _find_visible(
-            driver,
-            By.CSS_SELECTOR,
-            'svg[aria-label="Descurtir"][width="24"][height="24"]',
-            timeout=1.0,
-        )
-    except Exception:
-        return None
-
-
-def _svg_like(driver: WebDriver):
-    try:
-        return _find_visible(
-            driver,
-            By.CSS_SELECTOR,
-            'svg[aria-label="Curtir"][width="24"][height="24"]',
-            timeout=2.0,
-        )
-    except Exception:
-        return None
-
-
-def _click_svg(driver: WebDriver, svg_el) -> bool:
-    try:
-        # destaque antes do clique
-        _highlight_element(
-            driver, svg_el, color="red", duration_ms=900, label="clicando"
-        )
-        driver.execute_script("arguments[0].click();", svg_el)
+        _highlight(driver, el, "red")
+        logger.info(f"🖱️ click SVG alvo: {_describe_el(driver, el)}")
+        driver.execute_script("arguments[0].click();", el)
         return True
-    except Exception:
-        return False
+    except Exception as e:
+        logger.warning(f"Falha ao clicar no SVG (direto): {e}")
 
-
-def _mark_consumed_if_possible(target: Dict, profile_dir: Optional[str]) -> None:
+    # 2) clicar no pai
     try:
-        if profile_dir and target.get("id"):
-            mark_target_consumed(profile_dir, target["id"])
-    except Exception:
-        pass
+        parent = driver.execute_script("return arguments[0].parentElement;", el)
+        if parent:
+            _highlight(driver, parent, "red")
+            logger.info(f"🖱️ fallback click PAI: {_describe_el(driver, parent)}")
+            driver.execute_script("arguments[0].click();", parent)
+            return True
+    except Exception as e:
+        logger.warning(f"Falha ao clicar no pai: {e}")
+
+    # 3) clicar no avô (padrão do snippet do fórum: /../..)
+    try:
+        grand = driver.execute_script(
+            "return arguments[0].parentElement?.parentElement;", el
+        )
+        if grand:
+            _highlight(driver, grand, "red")
+            logger.info(f"🖱️ fallback click AVÔ: {_describe_el(driver, grand)}")
+            driver.execute_script("arguments[0].click();", grand)
+            return True
+    except Exception as e:
+        logger.warning(f"Falha ao clicar no avô: {e}")
+
+    return False
 
 
-# ---------------------------
-# Public actions
-# ---------------------------
+# =========================
+# Ações públicas
+# =========================
 def do_like(
     driver: WebDriver, target: Dict, *, profile_dir: Optional[str] = None
 ) -> bool:
-    """
-    Dá like se possível. Se já estiver curtido (Descurtir presente), apenas marca consumido.
-    Mostra na UI o ícone que foi clicado (ou o que motivou o skip).
-    """
-    with timeit(logger, f"like {target.get('id') or target.get('url','')}"):
-        if not _navigate_to_target(driver, target):
-            return False
-
-        _avoid_liked_by_redirect(driver)
-
-        # Já curtido? destacar em AMARELO (skip) para debug
-        s_unlike = _svg_unlike(driver)
-        if s_unlike:
-            _highlight_element(
-                driver,
-                s_unlike,
-                color="gold",
-                duration_ms=1000,
-                label="já curtido (skip)",
-            )
-            logger.info("Post já curtido — pulando like.")
-            _mark_consumed_if_possible(target, profile_dir)
-            return True
-
-        s_like = _svg_like(driver)
-        if not s_like:
-            logger.info("Ícone de 'Curtir' não encontrado.")
-            return False
-
-        if not _click_svg(driver, s_like):
-            logger.info("Falha ao clicar no ícone de 'Curtir'.")
-            return False
-
-        # confirmação rápida: deve surgir o 'Descurtir'
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            human_sleep((0.25, 0.6), reason="confirmar like", logger=logger)
-            _avoid_liked_by_redirect(driver)
-            s_unlike = _svg_unlike(driver)
-            if s_unlike:
-                # destacar a confirmação também (curtido)
-                _highlight_element(
-                    driver, s_unlike, color="red", duration_ms=800, label="curtido"
-                )
-                _mark_consumed_if_possible(target, profile_dir)
-                return True
-
-        logger.info("Não foi possível confirmar o like.")
+    if not _navigate_to_target(driver, target):
         return False
+
+    if _already_liked(driver):
+        logger.info("Post já curtido — marcando como consumido e pulando.")
+        mark_target_consumed(profile_dir, target.get("id", target.get("url", "")))
+        return True
+
+    candidates = _gather_like_candidates(driver)
+    if not candidates:
+        logger.info("❌ nenhum candidato de like encontrado (SVG 24x24).")
+        return False
+
+    # tenta cada candidato até um clique bem-sucedido
+    for sel, el in candidates:
+        logger.info(f"tentando clicar candidato '{sel}' -> {_describe_el(driver, el)}")
+        ok = _click_svg_like(driver, el)
+        logger.info(f"resultado do clique: {'SUCESSO' if ok else 'FALHA'}")
+        if not ok:
+            continue
+
+        # confirmar transição para 'Descurtir'
+        end = time.time() + 3.5
+        while time.time() < end:
+            if _already_liked(driver):
+                logger.info("👍 estado mudou para 'Descurtir' — like confirmado.")
+                mark_target_consumed(
+                    profile_dir, target.get("id", target.get("url", ""))
+                )
+                return True
+            time.sleep(0.15)
+        logger.info(
+            "⚠️ clique executado, mas não confirmou 'Descurtir' — tentando próximo candidato…"
+        )
+
+    logger.info("❌ esgotou candidatos de like sem confirmação.")
+    return False
 
 
 def do_comment(
     driver: WebDriver, target: Dict, text: str, *, profile_dir: Optional[str] = None
 ) -> bool:
-    """
-    Comenta usando exatamente o textarea com aria-label 'Adicione um comentário...'.
-    Mostra na UI o textarea focado/acionado.
-    """
     if not text or not text.strip():
+        logger.info("❌ comentário vazio — pulando.")
         return False
 
-    with timeit(logger, f"comment {target.get('id') or target.get('url','')}"):
-        if not _navigate_to_target(driver, target):
-            return False
+    if not _navigate_to_target(driver, target):
+        return False
 
-        _avoid_liked_by_redirect(driver)
+    logger.info(f"🔎 procurando textarea exato: {COMMENT_TA_EXACT}")
+    textarea = _js_query(driver, COMMENT_TA_EXACT)
+    if not textarea:
+        logger.info(f"   não achou; tentando variação unicode: {COMMENT_TA_UNICODE}")
+        textarea = _js_query(driver, COMMENT_TA_UNICODE)
 
-        textarea = _find_visible(
-            driver,
-            By.CSS_SELECTOR,
-            'textarea[aria-label="Adicione um comentário..."]',
-            timeout=3.0,
-        )
-        if not textarea:
-            logger.info("Textarea de comentário não encontrada (PT-BR exato).")
-            return False
+    if not textarea:
+        logger.info("❌ textarea de comentário não encontrada.")
+        return False
 
-        try:
-            _highlight_element(
-                driver,
-                textarea,
-                color="red",
-                duration_ms=900,
-                label="digitando comentário",
-            )
-            textarea.click()
-        except Exception:
-            pass
+    try:
+        _highlight(driver, textarea, "red")
+        textarea.click()
+    except Exception:
+        pass
+    _sleep(0.12, 0.30)
 
-        human_sleep((0.15, 0.35), reason="foco no textarea", logger=logger)
-        _human_type(textarea, text.strip(), min_delay=0.02, max_delay=0.09)
-        human_sleep((0.2, 0.5), reason="pausa antes de enviar", logger=logger)
+    txt = text.strip()
+    logger.info(f"⌨️ digitando comentário ({len(txt)} chars)")
+    _human_type(textarea, txt, min_delay=0.02, max_delay=0.08)
+    _sleep(0.20, 0.45)
 
-        try:
-            textarea.send_keys(Keys.ENTER)
-        except Exception:
-            return False
+    try:
+        textarea.send_keys(Keys.ENTER)
+        logger.info("↩️ ENTER enviado")
+    except Exception as e:
+        logger.warning(f"Falha ao enviar ENTER: {e}")
 
-        # confirmação leve: textarea vazio OU comentário visível
-        deadline = time.time() + 4.0
-        posted = False
-        while time.time() < deadline:
-            human_sleep((0.4, 0.8), reason="confirmar comentário", logger=logger)
-            try:
-                val = textarea.get_attribute("value") or ""
-                if val.strip() == "":
-                    posted = True
-                    break
-            except Exception:
-                pass
-            try:
-                nodes = _find_all(
-                    driver, By.XPATH, f"//*[contains(text(), {repr(text.strip())})]"
-                )
-                if nodes:
-                    posted = True
-                    break
-            except Exception:
-                pass
+    _sleep(0.6, 1.1)
 
-        if posted:
-            # destaque curto pós-envio para depuração
-            try:
-                _highlight_element(
-                    driver,
-                    textarea,
-                    color="red",
-                    duration_ms=600,
-                    label="comentário enviado",
-                )
-            except Exception:
-                pass
-            _mark_consumed_if_possible(target, profile_dir)
+    try:
+        val = textarea.get_attribute("value") or ""
+        logger.info(f"   pós-ENTER, textarea length={len(val)}")
+        if val.strip() == "":
+            mark_target_consumed(profile_dir, target.get("id", target.get("url", "")))
+            logger.info("✅ comentário aparentemente publicado (textarea vazia).")
             return True
+    except Exception:
+        pass
 
-        logger.info("Não foi possível confirmar publicação do comentário.")
-        return False
+    # busca por fragmento
+    frag = txt[:20]
+    try:
+        found = driver.find_elements(By.XPATH, f"//*[contains(text(), {repr(frag)})]")
+        logger.info(f"   busca por fragmento {frag!r} -> {len(found)} nós")
+        if found:
+            mark_target_consumed(profile_dir, target.get("id", target.get("url", "")))
+            return True
+    except Exception:
+        pass
+
+    logger.info("⚠️ não foi possível confirmar publicação do comentário.")
+    return False

@@ -30,7 +30,7 @@ class Config:
 
     # -------- Conteúdo-alvo --------
     # Use qualquer lista aqui; ex.: ["argentina", "uruguai", "brazil"]
-    tags: List[str] = field(default_factory=lambda: ["argentina", "uruguai", "brazil"])
+    tags: List[str] = field(default_factory=lambda: ["paraguai", "uruguai", "brazil"])
     # Mantido para possível expansão futura (não usado no fluxo atual)
     locations: List[str] = field(default_factory=list)
 
