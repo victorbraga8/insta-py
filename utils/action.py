@@ -3,14 +3,12 @@ from __future__ import annotations
 
 import time
 import random
-from typing import Optional, Dict, Iterable, List, Tuple
+from typing import Optional, Dict, List, Tuple
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.common.exceptions import WebDriverException
 
 from utils.logger import get_logger
 from utils.driver import wait_for_page_ready
@@ -116,14 +114,13 @@ def _navigate_to_target(driver: WebDriver, target: Dict) -> bool:
 
 
 # =========================
-# Seletores
+# Seletores Like (PT/EN)
 # =========================
 LIKE_CSS_PT = 'svg[aria-label="Curtir"][width="24"][height="24"]'
 LIKE_CSS_EN = 'svg[aria-label="Like"][width="24"][height="24"]'
 UNLIKE_CSS_PT = 'svg[aria-label="Descurtir"][width="24"][height="24"]'
 UNLIKE_CSS_EN = 'svg[aria-label="Unlike"][width="24"][height="24"]'
 
-# XPath com local-name(), como no fórum — com width/height 24
 LIKE_XP_PT = (
     "//*[local-name()='svg' and @aria-label='Curtir' and @width='24' and @height='24']"
 )
@@ -135,20 +132,22 @@ UNLIKE_XP_EN = (
     "//*[local-name()='svg' and @aria-label='Unlike' and @width='24' and @height='24']"
 )
 
-# Último recurso de debug: qualquer svg 24x24 (não usamos para clicar, apenas logging)
-ANY_24 = "//*[local-name()='svg' and @width='24' and @height='24']"
-
-COMMENT_TA_EXACT = 'textarea[aria-label="Adicione um comentário..."]'
-COMMENT_TA_UNICODE = (
-    'textarea[aria-label="Adicione um comentário…"]'  # reticência unicode
-)
+ANY_24 = "//*[local-name()='svg' and @width='24' and @height='24']"  # debug
 
 
 # =========================
-# Coleta / verificação Like
+# Comentário – PT/EN e … / ...
+# =========================
+TA_PT_ELLIPSIS = 'textarea[aria-label="Adicione um comentário…"]'
+TA_PT_THREEDOTS = 'textarea[aria-label="Adicione um comentário..."]'
+TA_EN_ELLIPSIS = 'textarea[aria-label="Add a comment…"]'
+TA_EN_THREEDOTS = 'textarea[aria-label="Add a comment..."]'
+
+
+# =========================
+# Like helpers
 # =========================
 def _inventory_svgs(driver: WebDriver) -> Dict[str, List]:
-    """Varre múltiplos seletores e retorna um inventário para logging e tentativa."""
     inv: Dict[str, List] = {
         LIKE_CSS_PT: _js_query_all(driver, LIKE_CSS_PT),
         LIKE_CSS_EN: _js_query_all(driver, LIKE_CSS_EN),
@@ -158,23 +157,18 @@ def _inventory_svgs(driver: WebDriver) -> Dict[str, List]:
         UNLIKE_CSS_EN: _js_query_all(driver, UNLIKE_CSS_EN),
         UNLIKE_XP_PT: _xpath_all(driver, UNLIKE_XP_PT),
         UNLIKE_XP_EN: _xpath_all(driver, UNLIKE_XP_EN),
-        ANY_24: _xpath_all(driver, ANY_24),  # debug view
+        ANY_24: _xpath_all(driver, ANY_24),
     }
-    # Log do inventário
     logger.info("🔬 inventário de SVGs 24x24 relevantes:")
     for sel, items in inv.items():
-        if sel is ANY_24:
-            logger.info(f"  {sel} => {len(items)} elementos (apenas debug)")
-        else:
-            logger.info(f"  {sel} => {len(items)} elementos")
-        # listar primeiros 5 para não poluir
+        tag = " (apenas debug)" if sel is ANY_24 else ""
+        logger.info(f"  {sel} => {len(items)} elementos{tag}")
         for el in items[:5]:
             logger.info(f"    • {_describe_el(driver, el)}")
     return inv
 
 
 def _already_liked(driver: WebDriver) -> bool:
-    # qualquer uma das variantes de 'descurtir'
     for sel in (UNLIKE_CSS_PT, UNLIKE_CSS_EN):
         el = _js_query(driver, sel)
         if el:
@@ -193,29 +187,17 @@ def _already_liked(driver: WebDriver) -> bool:
 
 
 def _gather_like_candidates(driver: WebDriver) -> List[Tuple[str, object]]:
-    """Retorna lista ordenada (seletor, elemento) de candidatos a 'Curtir' (SVG 24x24)."""
     inv = _inventory_svgs(driver)
-
-    ordered_keys = [
-        LIKE_CSS_PT,
-        LIKE_CSS_EN,
-        LIKE_XP_PT,
-        LIKE_XP_EN,
-    ]
+    ordered_keys = [LIKE_CSS_PT, LIKE_CSS_EN, LIKE_XP_PT, LIKE_XP_EN]
     seen_ids = set()
     candidates: List[Tuple[str, object]] = []
     for key in ordered_keys:
         for el in inv.get(key, []):
-            # deduplicar pelo id interno do WebElement
-            try:
-                el_id = getattr(el, "id", None)
-            except Exception:
-                el_id = None
+            el_id = getattr(el, "id", None)
             if el_id in seen_ids:
                 continue
             seen_ids.add(el_id)
             candidates.append((key, el))
-
     logger.info(f"🎯 candidatos 'Curtir' (em ordem): {len(candidates)}")
     for i, (sel, el) in enumerate(candidates[:6], 1):
         logger.info(f"  [{i}] {sel} -> {_describe_el(driver, el)}")
@@ -223,7 +205,6 @@ def _gather_like_candidates(driver: WebDriver) -> List[Tuple[str, object]]:
 
 
 def _click_svg_like(driver: WebDriver, el) -> bool:
-    # 1) clicar no SVG
     try:
         _highlight(driver, el, "red")
         logger.info(f"🖱️ click SVG alvo: {_describe_el(driver, el)}")
@@ -231,8 +212,6 @@ def _click_svg_like(driver: WebDriver, el) -> bool:
         return True
     except Exception as e:
         logger.warning(f"Falha ao clicar no SVG (direto): {e}")
-
-    # 2) clicar no pai
     try:
         parent = driver.execute_script("return arguments[0].parentElement;", el)
         if parent:
@@ -242,8 +221,6 @@ def _click_svg_like(driver: WebDriver, el) -> bool:
             return True
     except Exception as e:
         logger.warning(f"Falha ao clicar no pai: {e}")
-
-    # 3) clicar no avô (padrão do snippet do fórum: /../..)
     try:
         grand = driver.execute_script(
             "return arguments[0].parentElement?.parentElement;", el
@@ -255,8 +232,31 @@ def _click_svg_like(driver: WebDriver, el) -> bool:
             return True
     except Exception as e:
         logger.warning(f"Falha ao clicar no avô: {e}")
-
     return False
+
+
+# =========================
+# Comentário helpers
+# =========================
+def _find_comment_textarea_simple(driver: WebDriver):
+    """Procura *apenas* textarea pelos rótulos que você especificou (PT/EN, … e ...)."""
+    css_order = [TA_PT_THREEDOTS, TA_PT_ELLIPSIS, TA_EN_THREEDOTS, TA_EN_ELLIPSIS]
+    for css in css_order:
+        el = _js_query(driver, css)
+        logger.info(f"🔎 textarea via CSS '{css}' -> {'OK' if el else 'nada'}")
+        if el:
+            logger.info(f"   alvo: {_describe_el(driver, el)}")
+            return el
+    fallback = _js_query(
+        driver,
+        "textarea[aria-label*='coment'],textarea[aria-label*='Coment'],"
+        "textarea[aria-label*='comment'],textarea[aria-label*='Comment']",
+    )
+    if fallback:
+        logger.info(f"   fallback textarea: {_describe_el(driver, fallback)}")
+    else:
+        logger.info("   nenhum textarea encontrado pelos padrões definidos.")
+    return fallback
 
 
 # =========================
@@ -278,7 +278,6 @@ def do_like(
         logger.info("❌ nenhum candidato de like encontrado (SVG 24x24).")
         return False
 
-    # tenta cada candidato até um clique bem-sucedido
     for sel, el in candidates:
         logger.info(f"tentando clicar candidato '{sel}' -> {_describe_el(driver, el)}")
         ok = _click_svg_like(driver, el)
@@ -286,7 +285,6 @@ def do_like(
         if not ok:
             continue
 
-        # confirmar transição para 'Descurtir'
         end = time.time() + 3.5
         while time.time() < end:
             if _already_liked(driver):
@@ -307,6 +305,12 @@ def do_like(
 def do_comment(
     driver: WebDriver, target: Dict, text: str, *, profile_dir: Optional[str] = None
 ) -> bool:
+    """
+    Comentário usando a mesma lógica de digitação “humana” do login:
+    - encontra exatamente o textarea correto (PT/EN, … e ...)
+    - clica para focar, garante foco e digita com _human_type
+    - envia ENTER e confirma
+    """
     if not text or not text.strip():
         logger.info("❌ comentário vazio — pulando.")
         return False
@@ -314,47 +318,80 @@ def do_comment(
     if not _navigate_to_target(driver, target):
         return False
 
-    logger.info(f"🔎 procurando textarea exato: {COMMENT_TA_EXACT}")
-    textarea = _js_query(driver, COMMENT_TA_EXACT)
-    if not textarea:
-        logger.info(f"   não achou; tentando variação unicode: {COMMENT_TA_UNICODE}")
-        textarea = _js_query(driver, COMMENT_TA_UNICODE)
-
+    textarea = _find_comment_textarea_simple(driver)
     if not textarea:
         logger.info("❌ textarea de comentário não encontrada.")
         return False
 
+    # Focar e preparar para digitar (estilo login)
     try:
         _highlight(driver, textarea, "red")
         textarea.click()
+        _sleep(0.10, 0.20)
+        textarea.click()  # alguns layouts expandem no segundo clique
+        _sleep(0.08, 0.16)
+        driver.execute_script("arguments[0].focus();", textarea)
+    except Exception as e:
+        logger.info(f"⚠️ foco inicial falhou: {e}")
+
+    # Verifica se realmente está focado
+    try:
+        is_active = driver.execute_script(
+            "return document.activeElement === arguments[0];", textarea
+        )
+        logger.info(f"   document.activeElement == textarea? {bool(is_active)}")
+        if not is_active:
+            textarea.click()
+            _sleep(0.08, 0.16)
     except Exception:
         pass
-    _sleep(0.12, 0.30)
 
+    # Digitação humana
     txt = text.strip()
     logger.info(f"⌨️ digitando comentário ({len(txt)} chars)")
-    _human_type(textarea, txt, min_delay=0.02, max_delay=0.08)
-    _sleep(0.20, 0.45)
+    try:
+        _human_type(textarea, txt, min_delay=0.03, max_delay=0.12)
+    except Exception as e:
+        logger.warning(f"Falha no send_keys direto: {e}")
+        try:
+            active = driver.switch_to.active_element
+            _human_type(active, txt, min_delay=0.03, max_delay=0.12)
+        except Exception as e2:
+            logger.warning(f"Falha no activeElement: {e2}")
+            return False
 
+    _sleep(0.15, 0.30)
+
+    # Enviar
     try:
         textarea.send_keys(Keys.ENTER)
         logger.info("↩️ ENTER enviado")
     except Exception as e:
         logger.warning(f"Falha ao enviar ENTER: {e}")
+        try:
+            btn = _js_query(driver, "form button[type='submit'], button[type='submit']")
+            if btn:
+                _highlight(driver, btn, "red")
+                driver.execute_script("arguments[0].click();", btn)
+                logger.info("🖱️ fallback: clique no botão de publicar")
+        except Exception:
+            pass
 
     _sleep(0.6, 1.1)
 
+    # Confirmação
     try:
         val = textarea.get_attribute("value") or ""
-        logger.info(f"   pós-ENTER, textarea length={len(val)}")
+        logger.info(f"   pós-ENTER, length do textarea={len(val)}")
         if val.strip() == "":
             mark_target_consumed(profile_dir, target.get("id", target.get("url", "")))
-            logger.info("✅ comentário aparentemente publicado (textarea vazia).")
+            logger.info(
+                "✅ comentário aparentemente publicado (textarea vazio após envio)."
+            )
             return True
     except Exception:
         pass
 
-    # busca por fragmento
     frag = txt[:20]
     try:
         found = driver.find_elements(By.XPATH, f"//*[contains(text(), {repr(frag)})]")
