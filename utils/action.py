@@ -62,6 +62,14 @@ def _xpath_all(driver: WebDriver, xpath: str) -> list:
         return []
 
 
+def _xpath_one(driver: WebDriver, xpath: str):
+    try:
+        els = driver.find_elements(By.XPATH, xpath)
+        return els[0] if els else None
+    except Exception:
+        return None
+
+
 def _highlight(driver: WebDriver, el, color: str = "red") -> None:
     try:
         driver.execute_script(
@@ -142,6 +150,12 @@ TA_PT_ELLIPSIS = 'textarea[aria-label="Adicione um comentário…"]'
 TA_PT_THREEDOTS = 'textarea[aria-label="Adicione um comentário..."]'
 TA_EN_ELLIPSIS = 'textarea[aria-label="Add a comment…"]'
 TA_EN_THREEDOTS = 'textarea[aria-label="Add a comment..."]'
+
+# Botão de publicar (UI nova usa uma <div role="button"> com o texto)
+POST_BTN_XP_EN = "//div[@role='button' and normalize-space()='Post']"
+POST_BTN_XP_PT = "//div[@role='button' and normalize-space()='Publicar']"
+POST_BTN_XP_EN_SPAN = "//div[@role='button'][.//span[normalize-space()='Post']]"
+POST_BTN_XP_PT_SPAN = "//div[@role='button'][.//span[normalize-space()='Publicar']]"
 
 
 # =========================
@@ -259,6 +273,27 @@ def _find_comment_textarea_simple(driver: WebDriver):
     return fallback
 
 
+def _find_post_button(driver: WebDriver):
+    """Procura o botão 'Post'/'Publicar' na UI nova (div role=button)."""
+    xpaths = [
+        POST_BTN_XP_EN,
+        POST_BTN_XP_PT,
+        POST_BTN_XP_EN_SPAN,
+        POST_BTN_XP_PT_SPAN,
+        # fallback genérico:
+        "//button[@type='submit' and not(@disabled)]",
+    ]
+    for xp in xpaths:
+        el = _xpath_one(driver, xp)
+        logger.info(
+            f"🔎 procurando botão de publicar com XPath: {xp} -> {'OK' if el else 'nada'}"
+        )
+        if el:
+            logger.info(f"   post button alvo: {_describe_el(driver, el)}")
+            return el
+    return None
+
+
 # =========================
 # Ações públicas
 # =========================
@@ -309,7 +344,8 @@ def do_comment(
     Comentário usando a mesma lógica de digitação “humana” do login:
     - encontra exatamente o textarea correto (PT/EN, … e ...)
     - clica para focar, garante foco e digita com _human_type
-    - envia ENTER e confirma
+    - tenta clicar no botão 'Post/Publicar' (UI nova). Se não achar, ENTER.
+    - confirma publicação.
     """
     if not text or not text.strip():
         logger.info("❌ comentário vazio — pulando.")
@@ -323,18 +359,16 @@ def do_comment(
         logger.info("❌ textarea de comentário não encontrada.")
         return False
 
-    # Focar e preparar para digitar (estilo login)
     try:
         _highlight(driver, textarea, "red")
         textarea.click()
-        _sleep(0.10, 0.20)
+        _sleep(0.12, 0.30)
         textarea.click()  # alguns layouts expandem no segundo clique
         _sleep(0.08, 0.16)
         driver.execute_script("arguments[0].focus();", textarea)
     except Exception as e:
         logger.info(f"⚠️ foco inicial falhou: {e}")
 
-    # Verifica se realmente está focado
     try:
         is_active = driver.execute_script(
             "return document.activeElement === arguments[0];", textarea
@@ -346,7 +380,6 @@ def do_comment(
     except Exception:
         pass
 
-    # Digitação humana
     txt = text.strip()
     logger.info(f"⌨️ digitando comentário ({len(txt)} chars)")
     try:
@@ -360,29 +393,36 @@ def do_comment(
             logger.warning(f"Falha no activeElement: {e2}")
             return False
 
-    _sleep(0.15, 0.30)
+    _sleep(0.20, 0.45)
 
-    # Enviar
-    try:
-        textarea.send_keys(Keys.ENTER)
-        logger.info("↩️ ENTER enviado")
-    except Exception as e:
-        logger.warning(f"Falha ao enviar ENTER: {e}")
+    # Preferir botão "Post"/"Publicar" (UI nova); senão ENTER
+    post_btn = _find_post_button(driver)
+    if post_btn:
         try:
-            btn = _js_query(driver, "form button[type='submit'], button[type='submit']")
-            if btn:
-                _highlight(driver, btn, "red")
-                driver.execute_script("arguments[0].click();", btn)
-                logger.info("🖱️ fallback: clique no botão de publicar")
-        except Exception:
-            pass
+            _highlight(driver, post_btn, "red")
+            logger.info("🖱️ clicando no botão de publicar")
+            _sleep(0.12, 0.28)  # pequeno delay antes do clique
+            driver.execute_script("arguments[0].click();", post_btn)
+        except Exception as e:
+            logger.warning(f"Falha ao clicar no botão Post/Publicar: {e}; usando ENTER")
+            try:
+                textarea.send_keys(Keys.ENTER)
+                logger.info("↩️ ENTER enviado (fallback)")
+            except Exception:
+                pass
+    else:
+        try:
+            textarea.send_keys(Keys.ENTER)
+            logger.info("↩️ ENTER enviado")
+        except Exception as e:
+            logger.warning(f"Falha ao enviar ENTER: {e}")
 
-    _sleep(0.6, 1.1)
+    _sleep(0.7, 1.2)
 
     # Confirmação
     try:
         val = textarea.get_attribute("value") or ""
-        logger.info(f"   pós-ENTER, length do textarea={len(val)}")
+        logger.info(f"   pós-envio, length do textarea={len(val)}")
         if val.strip() == "":
             mark_target_consumed(profile_dir, target.get("id", target.get("url", "")))
             logger.info(
