@@ -1,9 +1,0 @@
-{
-    "type": "weighted",
-    "weights": {
-        "like": 10,
-        "comment": 8,
-        "combo": 3,
-        "reels": 5
-    }
-}
